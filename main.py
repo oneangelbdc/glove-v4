@@ -248,22 +248,26 @@ def get_domain_optimized_parameters(doc_type, article_text):
         'academic': {
             'alpha': 0.2,      # Lower positional weight (academic structure varies)
             'lambda_param': 0.8, # Higher diversity penalty (avoid redundant concepts)
-            'target_ratio': max(0.15, min(0.25, 20/len(sentences))) if sentences else 0.2
+            'target_sentences': min(8, max(3, int(len(sentences) * 0.25))) if sentences else 4,  # Dynamic: 25% max, cap at 8
+            'summary_type': 'dynamic'
         },
         'legal': {
             'alpha': 0.1,      # Very low positional weight (legal clauses equally important)
             'lambda_param': 0.9, # Very high diversity penalty (each clause unique)
-            'target_ratio': max(0.1, min(0.2, 15/len(sentences))) if sentences else 0.15
+            'target_sentences': min(6, max(2, int(len(sentences) * 0.2))) if sentences else 3,   # Dynamic: 20% max, cap at 6
+            'summary_type': 'dynamic'
         },
         'news': {
             'alpha': 0.4,      # Higher positional weight (inverted pyramid)
             'lambda_param': 0.7, # Moderate diversity penalty
-            'target_ratio': max(0.2, min(0.4, 25/len(sentences))) if sentences else 0.3
+            'target_sentences': min(6, max(3, int(len(sentences) * 0.3))) if sentences else 4,   # Flexible: 30% but 3-6 sentences
+            'summary_type': 'flexible'
         },
         'general': {
             'alpha': 0.3,      # Balanced approach
             'lambda_param': 0.7,
-            'target_ratio': max(0.15, min(0.3, 20/len(sentences))) if sentences else 0.25
+            'target_sentences': min(6, max(2, int(len(sentences) * 0.3))) if sentences else 4,   # Dynamic: 30% max, cap at 6
+            'summary_type': 'dynamic'
         }
     }
     return base_params.get(doc_type, base_params['general'])

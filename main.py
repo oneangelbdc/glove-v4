@@ -214,7 +214,7 @@ def detect_document_type_with_details(article_text):
         ),
         
         'legal': (
-            features['legal_terms'] * 2 +
+            features['legal_terms'] * 1 +
             features['contract_language'] * 3 +
             features['legal_references'] * 4 +
             (1 if features['sentence_length_var'] > 80 else 0) * 2 +
@@ -232,7 +232,7 @@ def detect_document_type_with_details(article_text):
     
     # Determine dominant type
     max_score = max(scores.values())
-    if max_score > 3:  # Lower threshold for more sensitivity
+    if max_score > 10:  # adjust threshold for clearer dominance
         for doc_type, score in scores.items():
             if score == max_score:
                 return doc_type, features, unique_terms, scores
@@ -244,29 +244,31 @@ def get_domain_optimized_parameters(doc_type, article_text):
     Return optimized MMR parameters for each document type
     """
     sentences = nltk.sent_tokenize(article_text)
+    total_sentences = len(sentences)
+    
     base_params = {
         'academic': {
             'alpha': 0.2,      # Lower positional weight (academic structure varies)
             'lambda_param': 0.8, # Higher diversity penalty (avoid redundant concepts)
-            'target_sentences': min(8, max(3, int(len(sentences) * 0.25))) if sentences else 4,  # Dynamic: 25% max, cap at 8
+            'target_sentences': min(8, max(3, int(total_sentences * 0.25))) if total_sentences > 0 else 4,  # Dynamic: 25% max, cap at 8
             'summary_type': 'dynamic'
         },
         'legal': {
             'alpha': 0.1,      # Very low positional weight (legal clauses equally important)
             'lambda_param': 0.9, # Very high diversity penalty (each clause unique)
-            'target_sentences': min(6, max(2, int(len(sentences) * 0.2))) if sentences else 3,   # Dynamic: 20% max, cap at 6
+            'target_sentences': min(6, max(2, int(total_sentences * 0.2))) if total_sentences > 0 else 3,   # Dynamic: 20% max, cap at 6
             'summary_type': 'dynamic'
         },
         'news': {
             'alpha': 0.4,      # Higher positional weight (inverted pyramid)
             'lambda_param': 0.7, # Moderate diversity penalty
-            'target_sentences': min(6, max(3, int(len(sentences) * 0.3))) if sentences else 4,   # Flexible: 30% but 3-6 sentences
+            'target_sentences': min(6, max(3, int(total_sentences * 0.3))) if total_sentences > 0 else 4,   # Flexible: 30% but 3-6 sentences
             'summary_type': 'flexible'
         },
         'general': {
             'alpha': 0.3,      # Balanced approach
             'lambda_param': 0.7,
-            'target_sentences': min(6, max(2, int(len(sentences) * 0.3))) if sentences else 4,   # Dynamic: 30% max, cap at 6
+            'target_sentences': min(6, max(2, int(total_sentences * 0.3))) if total_sentences > 0 else 4,   # Dynamic: 30% max, cap at 6
             'summary_type': 'dynamic'
         }
     }
@@ -289,11 +291,12 @@ def domain_aware_mmr_summarization(article_text, glove_model):
     doc_type, features, unique_terms, scores = detect_document_type_with_details(article_text)
     params = get_domain_optimized_parameters(doc_type, article_text)
     
-    print(f"Detected document type: {doc_type}")
-    print(f"Using parameters - alpha: {params['alpha']}, lambda: {params['lambda_param']}, ratio: {params['target_ratio']}")
-    
     sentences = nltk.sent_tokenize(article_text)
     total_sentences = len(sentences)
+    
+    print(f"Detected document type: {doc_type}")
+    print(f"Total sentences in article: {total_sentences}")
+    print(f"Using parameters - alpha: {params['alpha']}, lambda: {params['lambda_param']}, target_sentences: {params['target_sentences']}")
     
     if total_sentences == 0:
         return "", doc_type, features, unique_terms, scores
@@ -335,8 +338,13 @@ def domain_aware_mmr_summarization(article_text, glove_model):
     summary_indices = []
     summary_embeddings = []
     
-    num_summary_sentences = max(1, int(len(valid_sentences) * params['target_ratio']))
+    # FIX: Ensure we don't try to select more sentences than available
+    num_summary_sentences = min(params['target_sentences'], len(valid_sentences))
     print(f"Target summary sentences: {num_summary_sentences}")
+    print(f"Available valid sentences: {len(valid_sentences)}")
+    
+    if num_summary_sentences <= 0:
+        return "No sentences selected for summary.", doc_type, features, unique_terms, scores
     
     # Select first sentence (usually important)
     if valid_sentences:
@@ -345,55 +353,59 @@ def domain_aware_mmr_summarization(article_text, glove_model):
         summary_indices.append(valid_sentences[first_idx][0])
         summary_embeddings.append(sentence_embeddings[first_idx])
     
-    # MMR for remaining sentences
-    remaining_indices = [i for i in range(len(valid_sentences)) if i != first_idx]
-    
-    while len(summary_sentences) < num_summary_sentences and remaining_indices:
-        best_score = -float('inf')
-        best_idx = None
+    # MMR for remaining sentences - but only if we need more
+    if len(summary_sentences) < num_summary_sentences:
+        remaining_indices = [i for i in range(len(valid_sentences)) if i != first_idx]
         
-        for idx in remaining_indices:
-            sent_idx, sentence = valid_sentences[idx]
-            sent_embedding = sentence_embeddings[idx].reshape(1, -1)
+        while len(summary_sentences) < num_summary_sentences and remaining_indices:
+            best_score = -float('inf')
+            best_idx = None
             
-            relevance = relevance_scores[idx]
+            for idx in remaining_indices:
+                sent_idx, sentence = valid_sentences[idx]
+                sent_embedding = sentence_embeddings[idx].reshape(1, -1)
+                
+                relevance = relevance_scores[idx]
+                
+                # Diversity calculation
+                max_similarity = 0
+                if summary_embeddings:
+                    summary_matrix = np.array(summary_embeddings)
+                    similarities = cosine_similarity(sent_embedding, summary_matrix)
+                    max_similarity = np.max(similarities)
+                
+                # MMR scoring
+                mmr_score = relevance - (max_similarity * params['lambda_param'])
+                
+                # Positional weighting
+                pos_score = positional_weight(sent_idx, total_sentences)
+                
+                # Final score
+                final_score = params['alpha'] * pos_score + (1 - params['alpha']) * mmr_score
+                
+                if final_score > best_score:
+                    best_score = final_score
+                    best_idx = idx
             
-            # Diversity calculation
-            max_similarity = 0
-            if summary_embeddings:
-                summary_matrix = np.array(summary_embeddings)
-                similarities = cosine_similarity(sent_embedding, summary_matrix)
-                max_similarity = np.max(similarities)
-            
-            # MMR scoring
-            mmr_score = relevance - (max_similarity * params['lambda_param'])
-            
-            # Positional weighting
-            pos_score = positional_weight(sent_idx, total_sentences)
-            
-            # Final score
-            final_score = params['alpha'] * pos_score + (1 - params['alpha']) * mmr_score
-            
-            if final_score > best_score:
-                best_score = final_score
-                best_idx = idx
-        
-        if best_idx is not None:
-            sent_idx, sentence = valid_sentences[best_idx]
-            summary_sentences.append(sentence)
-            summary_indices.append(sent_idx)
-            summary_embeddings.append(sentence_embeddings[best_idx])
-            remaining_indices.remove(best_idx)
+            if best_idx is not None:
+                sent_idx, sentence = valid_sentences[best_idx]
+                summary_sentences.append(sentence)
+                summary_indices.append(sent_idx)
+                summary_embeddings.append(sentence_embeddings[best_idx])
+                remaining_indices.remove(best_idx)
     
     # Sort by original order
     sorted_summary = [sentence for _, sentence in sorted(zip(summary_indices, summary_sentences))]
     
     result = " ".join(sorted_summary)
-    print(f"Generated summary: {len(nltk.sent_tokenize(result))} sentences")
+    actual_sentences = len(nltk.sent_tokenize(result))
+    print(f"Generated summary: {actual_sentences} sentences (target was {num_summary_sentences})")
     return result, doc_type, features, unique_terms, scores
 
 def positional_weight(sentence_index, total_sentences):
     """Positional weighting for sentence importance"""
+    if total_sentences == 0:
+        return 0.5
     normalized_pos = sentence_index / total_sentences
     if normalized_pos < 0.1 or normalized_pos > 0.9:
         return 0.8
@@ -649,16 +661,17 @@ class SummarizationGUI:
         self.ref_frame.text.insert(END, csv_summary)
         self.domain_frame.text.insert(END, domain_summary)
 
-        # ROUGE Evaluation
+        # ROUGE Evaluation with ROUGE-1 metrics only
         try:
-            scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+            scorer = rouge_scorer.RougeScorer(['rouge1'], use_stemmer=True)
             
             domain_scores = scorer.score(csv_summary, domain_summary)
             
-            # Update domain-aware results
+            # Update domain-aware results with ROUGE-1 metrics
             domain_text = (f"Domain-Aware ({doc_type.upper()}) - "
-                          f"ROUGE-1: {domain_scores['rouge1'].fmeasure:.4f} | "
-                          f"ROUGE-L: {domain_scores['rougeL'].fmeasure:.4f} | "
+                          f"ROUGE-1: F1={domain_scores['rouge1'].fmeasure:.4f}, "
+                          f"Precision={domain_scores['rouge1'].precision:.4f}, "
+                          f"Recall={domain_scores['rouge1'].recall:.4f} | "
                           f"Sentences: {len(nltk.sent_tokenize(domain_summary))}")
             self.domain_results.config(text=domain_text)
             
@@ -666,9 +679,9 @@ class SummarizationGUI:
             self.memory_label.config(text=format_memory_metrics())
             
             # Performance summary
-            avg_score = (domain_scores['rouge1'].fmeasure + domain_scores['rougeL'].fmeasure) / 2
-            performance = f"Domain-aware summarization achieved average ROUGE score of {avg_score:.4f} for {doc_type} document"
-            color = "darkgreen" if avg_score > 0.3 else "darkred" if avg_score < 0.2 else "black"
+            avg_f1 = domain_scores['rouge1'].fmeasure
+            performance = f"Domain-aware summarization achieved ROUGE-1 F1 score of {avg_f1:.4f} for {doc_type} document"
+            color = "darkgreen" if avg_f1 > 0.3 else "darkred" if avg_f1 < 0.2 else "black"
                 
             self.performance_summary.config(text=performance, fg=color)
             
